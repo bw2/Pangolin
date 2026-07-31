@@ -106,6 +106,93 @@ def compute_score(ref_seq, alt_seq, strand, d, models):
     return loss, gain, loss_ref, loss_alt, gain_ref, gain_alt
 
 
+def compute_ref_score(ref_seq, strand, models):
+    """REF-only counterpart of compute_score: no ALT sequence needed.
+
+    Returns, per position, the strongest predicted splice-site probability
+    across the 4 tissue models (Pangolin does not distinguish acceptor vs.
+    donor the way SpliceAI does -- each tissue model just predicts "is this a
+    splice site").
+    """
+    ref_seq = one_hot_encode(ref_seq, strand).T
+    ref_seq = torch.from_numpy(np.expand_dims(ref_seq, axis=0)).float()
+
+    if torch.cuda.is_available():
+        ref_seq = ref_seq.to(torch.device("cuda"))
+
+    pangolin_ref = []
+    for j in range(4):
+        score_ref = []
+        for model in models[3*j: 3*j+3]:
+            with torch.no_grad():
+                ref = model(ref_seq)[0][[1,4,7,10][j],:].cpu().numpy()
+                if strand == '-':
+                    ref = ref[::-1]
+                score_ref.append(ref)
+        pangolin_ref.append(np.mean(score_ref, axis=0))
+
+    pangolin_ref = np.array(pangolin_ref)
+    return np.max(pangolin_ref, axis=0)
+
+
+def process_position(lnum, chr, pos, gtf, models, args):
+    """REF-only counterpart of process_variant: no ALT allele needed.
+
+    Reports, per transcript, the strongest predicted REF splice-site
+    probability anywhere in the +/-args.distance window around `pos` (matching
+    the "max score in window" convention used by SpliceAI's REF-only mode),
+    plus the full above-threshold curve for visualization.
+    """
+    d = args.distance
+
+    fasta = pyfastx.Fasta(args.reference_file)
+    if chr not in fasta.keys() and "chr"+chr in fasta.keys():
+        chr = "chr"+chr
+    elif chr not in fasta.keys() and chr[3:] in fasta.keys():
+        chr = chr[3:]
+
+    try:
+        seq = fasta[chr][pos-5001-d:pos+5000+d].seq
+    except Exception as e:
+        print(e)
+        print("[Line %s]" % lnum, "WARNING, skipping position: Could not get sequence, possibly because the position is too close to chromosome ends. "
+                                  "See error message above.")
+        return None
+
+    genes_pos, genes_neg = get_genes(chr, pos, gtf)
+    if len(genes_pos) + len(genes_neg) == 0:
+        print("[Line %s]" % lnum, "WARNING, skipping position: Not contained in a gene body. Do GTF/FASTA chromosome names match?")
+        return None
+
+    genomic_coords = np.arange(pos-d, pos+d+1)
+
+    results = []
+    for genes, strand in [(genes_pos, "+"), (genes_neg, "-")]:
+        if not genes:
+            continue
+
+        ref_score = compute_ref_score(seq, strand, models)
+
+        if len(genomic_coords) != len(ref_score):
+            raise ValueError(f"Internal error: len(genomic_coords) != len(ref_score): {len(genomic_coords)} != {len(ref_score)}")
+
+        s = np.argmax(ref_score)
+        for transcript_id in genes:
+            results.append({
+                "NAME": transcript_id,
+                "S_REF": f"{ref_score[s]:{FLOAT_FORMAT}}",  # strongest predicted REF splice-site probability anywhere in the window
+                "DP_S": int(s-d),  # position (relative to the queried position) of that strongest predicted site
+                "ALL_NON_ZERO_SCORES": [
+                    {"pos": int(genomic_coord), "S_REF": f"{score:{FLOAT_FORMAT}}"}
+                    for i, (genomic_coord, score) in enumerate(zip(genomic_coords, ref_score))
+                    if score >= MIN_SCORE_THRESHOLD or i == s
+                ],
+                "STRAND": strand,
+            })
+
+    return results
+
+
 def get_genes(chr, pos, gtf):
     genes = gtf.region((chr, pos-1, pos-1), featuretype="transcript")
     genes_pos, genes_neg = {}, {}
