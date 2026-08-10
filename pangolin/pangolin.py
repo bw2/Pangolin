@@ -9,7 +9,7 @@ import vcf
 
 from pangolin.model import L, W, AR, Pangolin
 
-FLOAT_FORMAT = "0.2f"
+FLOAT_FORMAT = "0.3f"
 
 # use a 0.1 threshold for ALL_NON_ZERO_SCORES because Pangolin's baseline probability seems to be ~0.05 for most
 # positions, so 0.1 separates the unusually large scores
@@ -291,6 +291,42 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
                 raise ValueError(f"Internal error: len(genomic_coords) != len(loss): {len(genomic_coords)} != {len(loss)}")
 
             l, g = np.argmin(loss), np.argmax(gain)
+
+            # Report every position that clears the threshold and the positions where the delta
+            # scores are maximized, as before, plus the variant's own position -- that one even
+            # when nothing there clears the threshold, since it is what the caller asked about.
+            all_non_zero_scores = []
+            for window_i in sorted(
+                    {int(i) for i in np.flatnonzero(
+                        np.max(np.stack([loss_ref, loss_alt, gain_ref, gain_alt]), axis=0) >= MIN_SCORE_THRESHOLD)}
+                    | {int(l), int(g), d}):
+                genomic_coord = int(genomic_coords[window_i])
+                reference_base = seq[genomic_coord - pos + 5000 + d].upper()
+                if genomic_coord == pos and len(ref) != len(alt):
+                    # insertion or deletion: show the whole alleles on the anchor row, the way
+                    # the variant itself is written
+                    ref_base, alt_base = ref, alt
+                elif pos <= genomic_coord < pos + len(ref):
+                    # covered by the REF allele: for an equal-length substitution each position
+                    # has its own ALT base, otherwise the base is deleted by the variant
+                    ref_base = reference_base
+                    alt_base = alt[genomic_coord - pos] if len(ref) == len(alt) else "-"
+                else:
+                    ref_base, alt_base = reference_base, reference_base
+
+                all_non_zero_scores.append({
+                    "pos": genomic_coord,
+                    "ref": ref_base,
+                    "alt": alt_base,
+                    # reference and alt sequence splice probabilities in the tissue where the splice
+                    # loss delta score is largest at this position, and separately where the splice
+                    # gain delta score is largest
+                    "SL_REF": f"{loss_ref[window_i]:{FLOAT_FORMAT}}",
+                    "SL_ALT": f"{loss_alt[window_i]:{FLOAT_FORMAT}}",
+                    "SG_REF": f"{gain_ref[window_i]:{FLOAT_FORMAT}}",
+                    "SG_ALT": f"{gain_alt[window_i]:{FLOAT_FORMAT}}",
+                })
+
             results.append({
                 "NAME": transcript_id,
                 "DS_SG": f"{gain[g]:{FLOAT_FORMAT}}",  # splice gain delta score at the position where the splice gain delta score is maximum
@@ -301,18 +337,7 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
                 "SG_ALT": f"{gain_alt[g]:{FLOAT_FORMAT}}",  # alt sequence splice probability at position and tissue where splice gain is maximum
                 "SL_REF": f"{loss_ref[l]:{FLOAT_FORMAT}}",  # reference sequence splice probability at position and tissue where splice loss is maximum
                 "SL_ALT": f"{loss_alt[l]:{FLOAT_FORMAT}}",  # alt sequence splice probability at position and tissue where splice loss is maximum
-                "ALL_NON_ZERO_SCORES": [
-                    {
-                        "pos": int(genomic_coord),
-                        "SL_REF": f"{loss_ref_score:{FLOAT_FORMAT}}",  # reference sequence splice probability in the tissue where the splice loss delta score is largest at this position
-                        "SL_ALT": f"{loss_alt_score:{FLOAT_FORMAT}}",  # alt sequence splice probability in the tissue where the splice loss delta score is largest at this position
-                        "SG_REF": f"{gain_ref_score:{FLOAT_FORMAT}}",  # reference sequence splice probability in the tissue where the splice gain delta score is largest at this position
-                        "SG_ALT": f"{gain_alt_score:{FLOAT_FORMAT}}",  # alt sequence splice probability in the tissue where the splice gain delta score is largest at this position
-                    } for i, (genomic_coord, loss_ref_score, loss_alt_score, gain_ref_score, gain_alt_score) in enumerate(zip(
-                        genomic_coords, loss_ref, loss_alt, gain_ref, gain_alt)
-                    ) if any(score >= MIN_SCORE_THRESHOLD for score in (
-                        loss_ref_score, loss_alt_score, gain_ref_score, gain_alt_score)) or i in (l, g)
-                ],
+                "ALL_NON_ZERO_SCORES": all_non_zero_scores,
                 "STRAND": strand,
             })
 
