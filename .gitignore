@@ -3,3 +3,6 @@ GRCh37.primary_assembly.genome.fa.gz.fxi
 
 # macOS Finder metadata
 .DS_Store
+
+# compiled python, including the tests package
+__pycache__/

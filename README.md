@@ -43,8 +43,8 @@ See below for information on usage and local installation.
       ```
 
 2. Run Pangolin on a VCF or CSV file containing a list of variants. Under default settings, the maximum increase and decrease in score within 50 bases of the variant, along with their positions, will be reported. Format in the output file: `gene|pos:largest_increase|pos:largest_decrease|`
-   * Only substitutions and simple insertions/deletions (either the REF or ALT field is a single base) are currently supported.
-   * Variants are skipped if: they are not contained in a gene, defined by the annotation file; are within 5000 bases of the chromosome ends; are deletions larger than twice the input parameter -d; or do not match sequences from the reference FASTA file.
+   * Substitutions, insertions, deletions, and deletion-insertions (where REF and ALT are both longer than one base and differ in length) are supported. Bases that REF and ALT share are trimmed before the two score tracks are lined up, so spellings of the same variant padded with unchanged bases get the same score at every position they have in common. The window itself still starts at the position as written, so a padded spelling covers a few extra positions at its edges.
+   * Variants are skipped if: they are not contained in a gene, defined by the annotation file; are within 5000 bases of the chromosome ends; have a REF field longer than twice the input parameter -d; or do not match sequences from the reference FASTA file.
 
     Example usage:
     ```

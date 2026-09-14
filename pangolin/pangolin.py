@@ -8,6 +8,7 @@ import torch
 import vcf
 
 from pangolin.model import L, W, AR, Pangolin
+from pangolin.score_alignment import align_ref_and_alt_scores, ref_and_alt_bases_for_position
 
 FLOAT_FORMAT = "0.3f"
 
@@ -33,7 +34,7 @@ def one_hot_encode(seq, strand):
     return IN_MAP[seq.astype('int8')]
 
 
-def compute_score(ref_seq, alt_seq, strand, d, models):
+def compute_score(ref_seq, alt_seq, ref_allele, alt_allele, strand, d, models):
     ref_seq = one_hot_encode(ref_seq, strand).T
     ref_seq = torch.from_numpy(np.expand_dims(ref_seq, axis=0)).float()
     alt_seq = one_hot_encode(alt_seq, strand).T
@@ -58,12 +59,7 @@ def compute_score(ref_seq, alt_seq, strand, d, models):
                     ref = ref[::-1]
                     alt = alt[::-1]
 
-                l = 2*d+1
-                ndiff = np.abs(len(ref)-len(alt))
-                if len(ref) > len(alt):
-                    alt = np.concatenate([alt[0:l//2+1], np.zeros(ndiff), alt[l//2+1:]])
-                elif len(ref) < len(alt):
-                    alt = np.concatenate([alt[0:l//2], np.max(alt[l//2:l//2+ndiff+1], keepdims=True), alt[l//2+ndiff+1:]])
+                ref, alt = align_ref_and_alt_scores(ref, alt, ref_allele, alt_allele, d)
 
                 score.append(alt - ref)
                 score_ref.append(ref)
@@ -224,8 +220,10 @@ def get_genes(chr, pos, gtf):
 def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
     d = args.distance
 
-    if len(set("ACGT").intersection(set(ref))) == 0 or len(set("ACGT").intersection(set(alt))) == 0 \
-            or (len(ref) != 1 and len(alt) != 1 and len(ref) != len(alt)):
+    # Alleles that are both longer than one base used to be rejected here unless they were the same
+    # length. align_ref_and_alt_scores now lines those up too, so the only spellings left out are the
+    # ones with no ACGT base at all.
+    if len(set("ACGT").intersection(set(ref))) == 0 or len(set("ACGT").intersection(set(alt))) == 0:
         print("[Line %s]" % lnum, "WARNING, skipping variant: Variant format not supported.")
         return None
     elif len(ref) > 2*d:
@@ -278,7 +276,8 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
         if not genes:
             continue
 
-        orig_loss, orig_gain, loss_ref, loss_alt, gain_ref, gain_alt = compute_score(ref_seq, alt_seq, strand, d, models)
+        orig_loss, orig_gain, loss_ref, loss_alt, gain_ref, gain_alt = compute_score(
+            ref_seq, alt_seq, ref, alt, strand, d, models)
 
         for transcript_id, positions in genes.items():
             positions = np.array(positions)
@@ -320,17 +319,7 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
                     | {int(l), int(g), d}):
                 genomic_coord = int(genomic_coords[window_i])
                 reference_base = seq[genomic_coord - pos + 5000 + d].upper()
-                if genomic_coord == pos and len(ref) != len(alt):
-                    # insertion or deletion: show the whole alleles on the anchor row, the way
-                    # the variant itself is written
-                    ref_base, alt_base = ref, alt
-                elif pos <= genomic_coord < pos + len(ref):
-                    # covered by the REF allele: for an equal-length substitution each position
-                    # has its own ALT base, otherwise the base is deleted by the variant
-                    ref_base = reference_base
-                    alt_base = alt[genomic_coord - pos] if len(ref) == len(alt) else "-"
-                else:
-                    ref_base, alt_base = reference_base, reference_base
+                ref_base, alt_base = ref_and_alt_bases_for_position(pos, ref, alt, genomic_coord, reference_base)
 
                 all_non_zero_scores.append({
                     "pos": genomic_coord,
