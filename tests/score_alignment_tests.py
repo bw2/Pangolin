@@ -123,31 +123,83 @@ class AlignRefAndAltScoresTest(unittest.TestCase):
         np.testing.assert_array_equal(aligned_alt, np.concatenate(
             [alt_scores[:D+1], np.max(alt_scores[D+1:D+3], keepdims=True), alt_scores[D+3:]]))
 
-    # --- a deletion-insertion reports its whole span once, at the span's first position ---
+    # --- a deletion-insertion reports its whole span once, where the REF signal is strongest ---
 
-    def test_deletion_insertion_reports_the_strongest_site_on_each_side(self):
-        ref_scores, alt_scores, aligned_ref, aligned_alt = self.align("AT", "GCC")
-        self.assertEqual(aligned_ref[D], np.max(ref_scores[D:D+2]))
-        self.assertEqual(aligned_alt[D], np.max(alt_scores[D:D+3]))
+    def peaked(self, ref, alt, peak_offset):
+        """Align with one strong REF score `peak_offset` bases into the window, the rest flat."""
+        ref_scores = np.full(2*D + len(ref), 0.05)
+        alt_scores = np.full(2*D + len(alt), 0.05)
+        ref_scores[D + peak_offset] = 0.9
+        aligned_ref, aligned_alt = align_ref_and_alt_scores(ref_scores, alt_scores, ref, alt, D)
+        return ref_scores, alt_scores, aligned_ref, aligned_alt
+
+    def test_deletion_insertion_is_reported_at_the_strongest_ref_position(self):
+        # Wherever the site the variant replaces sits inside the span, the comparison is reported at that
+        # position. Masking keeps a loss only where a splice site is annotated, so reporting it at the
+        # span's first base instead would have thrown the loss away whenever the site was not that base.
+        for peak_offset in (0, 1, 2):
+            with self.subTest(peak_offset=peak_offset):
+                ref_scores, alt_scores, _, aligned_alt = self.peaked("ATG", "CC", peak_offset)
+                anchor = D + peak_offset
+                self.assertEqual(aligned_alt[anchor], np.max(alt_scores[D:D+2]))
+                for other in sorted(set(range(D, D+3)) - {anchor}):
+                    self.assertEqual(aligned_alt[other], ref_scores[other])
+
+    def test_tied_ref_scores_are_reported_at_the_earliest_position(self):
+        ref_scores = np.full(2*D + 3, 0.05)
+        alt_scores = np.full(2*D + 2, 0.05)
+        ref_scores[D] = ref_scores[D+2] = 0.7
+        _, aligned_alt = align_ref_and_alt_scores(ref_scores, alt_scores, "ATG", "CC", D)
+        self.assertEqual(aligned_alt[D], np.max(alt_scores[D:D+2]))
+        self.assertEqual(aligned_alt[D+2], ref_scores[D+2])
+
+    def test_an_anchor_array_decides_the_position_for_tracks_that_share_it(self):
+        # compute_score averages three replicate models per tissue, so they have to report a
+        # deletion-insertion at one position; it passes the replicate mean and each replicate follows
+        # it rather than its own strongest base.
+        ref_scores = np.full(2*D + 3, 0.05)
+        alt_scores = np.full(2*D + 2, 0.05)
+        ref_scores[D] = 0.9          # this track's own strongest base is the span's first
+        anchor = np.full(2*D + 3, 0.05)
+        anchor[D+2] = 0.9            # the tracks together agree the third base is strongest
+        _, aligned_alt = align_ref_and_alt_scores(
+            ref_scores, alt_scores, "ATG", "CC", D, anchor_scores=anchor)
+        self.assertEqual(aligned_alt[D+2], np.max(alt_scores[D:D+2]))
+        self.assertEqual(aligned_alt[D], ref_scores[D])
+
+    def test_an_anchor_array_changes_nothing_outside_the_deletion_insertion_branch(self):
+        for ref, alt in (("G", "A"), ("TG", "CA"), ("GGGC", "G"), ("A", "AGAGAG"), ("CTG", "CT")):
+            with self.subTest(ref=ref, alt=alt):
+                ref_scores = scores(2*D + len(ref), first=1)
+                alt_scores = scores(2*D + len(alt), first=1000)
+                _, with_anchor = align_ref_and_alt_scores(
+                    ref_scores, alt_scores, ref, alt, D, anchor_scores=np.zeros(2*D + len(ref)))
+                _, without_anchor = align_ref_and_alt_scores(ref_scores, alt_scores, ref, alt, D)
+                np.testing.assert_array_equal(with_anchor, without_anchor)
+
+    def test_deletion_insertion_leaves_the_ref_track_untouched(self):
+        # the strongest REF score already sits at the position the span is reported at
+        for ref, alt in (("AT", "GCC"), ("ATG", "GC"), ("GAT", "GGCC")):
+            with self.subTest(ref=ref, alt=alt):
+                ref_scores, _, aligned_ref, _ = self.align(ref, alt)
+                np.testing.assert_array_equal(aligned_ref, ref_scores)
 
     def test_deletion_insertion_leaves_the_rest_of_the_span_showing_no_change(self):
-        ref_scores, _, aligned_ref, aligned_alt = self.align("ATG", "GC")
-        np.testing.assert_array_equal(aligned_ref[D+1:D+3], ref_scores[D+1:D+3])
+        ref_scores, _, _, aligned_alt = self.peaked("ATG", "GC", 0)
         np.testing.assert_array_equal(aligned_alt[D+1:D+3], ref_scores[D+1:D+3])
 
     def test_deletion_insertion_leaves_positions_outside_the_span_alone(self):
         ref_scores, alt_scores, aligned_ref, aligned_alt = self.align("AT", "GCC")
-        np.testing.assert_array_equal(aligned_ref[:D], ref_scores[:D])
-        np.testing.assert_array_equal(aligned_ref[D+2:], ref_scores[D+2:])
+        np.testing.assert_array_equal(aligned_ref, ref_scores)
         np.testing.assert_array_equal(aligned_alt[:D], alt_scores[:D])
         np.testing.assert_array_equal(aligned_alt[D+2:], alt_scores[D+3:])
 
-    def test_deletion_insertion_with_shared_bases_is_reported_at_the_bases_it_changes(self):
-        # GAT>GGCC changes AT>GCC one base later, so the span starts one base after the center
-        ref_scores, alt_scores, aligned_ref, aligned_alt = self.align("GAT", "GGCC")
-        np.testing.assert_array_equal(aligned_ref[:D+1], ref_scores[:D+1])
-        self.assertEqual(aligned_ref[D+1], np.max(ref_scores[D+1:D+3]))
-        self.assertEqual(aligned_alt[D+1], np.max(alt_scores[D+1:D+4]))
+    def test_deletion_insertion_with_shared_bases_is_reported_inside_the_bases_it_changes(self):
+        # GAT>GGCC changes AT>GCC one base later, so the span covers D+1 and D+2
+        ref_scores, alt_scores, _, aligned_alt = self.peaked("GAT", "GGCC", 2)
+        np.testing.assert_array_equal(aligned_alt[:D+1], alt_scores[:D+1])
+        self.assertEqual(aligned_alt[D+1], ref_scores[D+1])
+        self.assertEqual(aligned_alt[D+2], np.max(alt_scores[D+1:D+4]))
 
     def test_output_has_one_score_per_ref_position(self):
         # including a REF far longer than the window is wide: Pangolin scores d bases past the end of

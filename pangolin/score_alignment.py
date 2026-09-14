@@ -39,7 +39,7 @@ def trim_shared_bases(ref, alt):
     return bases_dropped_from_start, ref, alt
 
 
-def align_ref_and_alt_scores(ref_scores, alt_scores, ref, alt, d):
+def align_ref_and_alt_scores(ref_scores, alt_scores, ref, alt, d, anchor_scores=None):
     """Line up the model's scores for the ALT sequence with the REF positions they are compared against.
 
     When REF and ALT differ in length, the ALT sequence has more or fewer positions than the REF one, so
@@ -55,11 +55,13 @@ def align_ref_and_alt_scores(ref_scores, alt_scores, ref, alt, d):
     - same length (an SNV or MNV): the positions already line up
     - one-base ALT (a deletion): the anchor base keeps its score and the deleted bases get zero
     - one-base REF (an insertion): the anchor base gets the highest score among itself and the inserted bases
-    - otherwise (a deletion-insertion): the whole span is reported once, at its first position, where the
-      REF track carries the highest score among the replaced bases and the ALT track the highest score
-      among the bases put in their place, so the difference between the two is what the variant changed.
-      Every later position of the span is given the same value on both tracks, which reports no change
-      there.
+    - otherwise (a deletion-insertion): the whole span is reported once, at the position holding the
+      highest REF score in it, where the ALT track carries the highest score among the bases put in the
+      span's place, so the difference between the two is what the variant changed. Every other position
+      of the span is given its REF score on both tracks, which reports no change there. Reporting at the
+      strongest REF position rather than at the span's first base keeps a splice site the variant
+      replaces at its own coordinate, which is what masking needs, since it keeps a loss only where a
+      splice site is annotated.
 
     The first three cases reproduce Pangolin's original handling exactly for a variant already written
     with no shared bases. The fourth is new: those variants used to be rejected as "Variant format not
@@ -72,6 +74,10 @@ def align_ref_and_alt_scores(ref_scores, alt_scores, ref, alt, d):
         ref (str): REF allele
         alt (str): ALT allele
         d (int): number of bases on either side of the variant that are being scored
+        anchor_scores (numpy.ndarray): REF scores to pick the deletion-insertion's position from, for
+            callers that have several score tracks to line up and then average together. They have to
+            report the span at one position or the average spreads a single signal over several of them
+            and shrinks it. Defaults to ref_scores, which is right for a caller with one track.
 
     Returns:
         tuple: (ref_scores, alt_scores), each of length 2*d + len(ref), one score per REF position
@@ -94,31 +100,31 @@ def align_ref_and_alt_scores(ref_scores, alt_scores, ref, alt, d):
             alt_scores[start+len(alt):]])
 
     # A deletion-insertion replaces every base of the span at once, so no base inside it has a counterpart
-    # to be compared against. Its first position carries the comparison for the whole span, and every
-    # position after it holds its REF score on both tracks, so the difference between the tracks, which is
-    # what the caller reports as a change, is zero there.
-    rest_of_span = ref_scores[start+1:start+len(ref)]
-    return (
-        np.concatenate([
-            ref_scores[:start],
-            np.max(ref_scores[start:start+len(ref)], keepdims=True),
-            rest_of_span,
-            ref_scores[start+len(ref):]]),
-        np.concatenate([
-            alt_scores[:start],
-            np.max(alt_scores[start:start+len(alt)], keepdims=True),
-            rest_of_span,
-            alt_scores[start+len(alt):]]),
-    )
+    # to be compared against. The comparison for the whole span is reported at one position: the strongest
+    # REF base of anchor_scores, which is this track unless the caller supplies another. That keeps a
+    # splice site the variant replaces at its own coordinate; np.argmax takes the first maximum, which is
+    # the earliest genomic position when several tie. Every other position of the span holds its REF score
+    # on both tracks, so the difference between the tracks, which is what the caller reports as a change,
+    # is zero there. The REF track is returned unchanged, since every position already carries its own
+    # score and only the ALT side has to move.
+    span_ref = ref_scores[start:start+len(ref)]
+    anchor_span = span_ref if anchor_scores is None else anchor_scores[start:start+len(ref)]
+    alt_span = span_ref.copy()
+    alt_span[np.argmax(anchor_span)] = np.max(alt_scores[start:start+len(alt)])
+    return ref_scores, np.concatenate([alt_scores[:start], alt_span, alt_scores[start+len(alt):]])
 
 
 def ref_and_alt_bases_for_position(pos, ref, alt, genomic_coord, reference_base):
     """Pick the REF and ALT bases to show on one row of the per-position table.
 
-    The row that carries a variant's scores is where its alleles first differ, which is not the
-    variant's own position when it is written with shared leading bases, so the alleles shown there
-    are the trimmed ones. For a variant already written with no shared bases they are the whole
-    alleles, which is what this reported before.
+    The alleles are named where they first differ, which is not the variant's own position when the
+    variant is written with shared leading bases, so the alleles shown there are the trimmed ones. For
+    a variant already written with no shared bases they are the whole alleles.
+
+    That is also where the scores sit, except for a deletion-insertion: its comparison is reported at
+    the strongest REF base of the span (see align_ref_and_alt_scores), which can be a later one. Every
+    base of the span is labelled as replaced, so the row carrying the comparison can read "<base> / -"
+    while the row naming the alleles shows no change. A plain deletion already reports that way.
 
     Args:
         pos (int): 1-based position of the variant
@@ -134,7 +140,7 @@ def ref_and_alt_bases_for_position(pos, ref, alt, genomic_coord, reference_base)
     changed_span_start = pos + bases_dropped_from_start
 
     if genomic_coord == changed_span_start and len(trimmed_ref) != len(trimmed_alt):
-        # insertion or deletion: show the alleles on the row carrying its scores
+        # insertion or deletion: name the alleles where they first differ
         return trimmed_ref, trimmed_alt
 
     if changed_span_start <= genomic_coord < changed_span_start + len(trimmed_ref):

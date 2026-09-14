@@ -48,9 +48,7 @@ def compute_score(ref_seq, alt_seq, ref_allele, alt_allele, strand, d, models):
     pangolin_ref = []
     pangolin_alt = []
     for j in range(4):
-        score = []
-        score_ref = []
-        score_alt = []
+        replicates = []
         for model in models[3*j: 3*j+3]:
             with torch.no_grad():
                 ref = model(ref_seq)[0][[1,4,7,10][j],:].cpu().numpy()
@@ -58,12 +56,26 @@ def compute_score(ref_seq, alt_seq, ref_allele, alt_allele, strand, d, models):
                 if strand == '-':
                     ref = ref[::-1]
                     alt = alt[::-1]
+                replicates.append((ref, alt))
 
-                ref, alt = align_ref_and_alt_scores(ref, alt, ref_allele, alt_allele, d)
+        # The three replicate models of a tissue are averaged below, so they have to report a
+        # deletion-insertion at the SAME position. Its comparison is collapsed onto the span's
+        # strongest REF base, and replicates that disagreed about which base that is would each put
+        # their difference at a different index, leaving the average with a fraction of the signal at
+        # each. Picking the position once, from the replicate mean, makes them agree. Every other
+        # allele shape lines up at a fixed index, so this changes nothing for them.
+        mean_ref_scores = np.mean([replicate_ref for replicate_ref, _ in replicates], axis=0)
 
-                score.append(alt - ref)
-                score_ref.append(ref)
-                score_alt.append(alt)
+        score = []
+        score_ref = []
+        score_alt = []
+        for ref, alt in replicates:
+            ref, alt = align_ref_and_alt_scores(ref, alt, ref_allele, alt_allele, d,
+                                                anchor_scores=mean_ref_scores)
+
+            score.append(alt - ref)
+            score_ref.append(ref)
+            score_alt.append(alt)
 
         pangolin.append(np.mean(score, axis=0))
         pangolin_ref.append(np.mean(score_ref, axis=0))
