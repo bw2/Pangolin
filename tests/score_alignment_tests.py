@@ -10,7 +10,7 @@ import unittest
 import numpy as np
 
 from pangolin.score_alignment import (
-    align_ref_and_alt_scores, ref_and_alt_bases_for_position, trim_shared_bases)
+    align_ref_and_alt_scores, get_padded_sequence, ref_and_alt_bases_for_position, trim_shared_bases)
 
 # A distance of 5, so the window holds 2*D + len(ref) positions and the variant's first base is at index D.
 D = 5
@@ -252,6 +252,47 @@ class RefAndAltBasesForPositionTest(unittest.TestCase):
     def test_positions_outside_the_variant_show_the_reference_base_on_both_sides(self):
         self.assertEqual(self.bases("TG", "T", 99, "C"), ("C", "C"))
         self.assertEqual(self.bases("TG", "T", 102, "A"), ("A", "A"))
+
+
+class FakeContig:
+    """Stands in for a pyfastx sequence: slicing returns an object whose .seq is the bases, and a slice
+    that runs past the end comes back short rather than raising, as pyfastx's does."""
+
+    def __init__(self, bases):
+        self.bases = bases
+
+    def __getitem__(self, key):
+        return type("Slice", (), {"seq": self.bases[key]})()
+
+
+class GetPaddedSequenceTest(unittest.TestCase):
+
+    def setUp(self):
+        self.contig = FakeContig("ACGTACGTAC")
+
+    def test_a_window_inside_the_contig_is_returned_as_is(self):
+        self.assertEqual(get_padded_sequence(self.contig, 2, 6), "GTAC")
+        self.assertEqual(get_padded_sequence(self.contig, 0, 10), "ACGTACGTAC")
+
+    def test_a_window_past_the_end_is_padded_with_n(self):
+        self.assertEqual(get_padded_sequence(self.contig, 6, 14), "GTACNNNN")
+
+    def test_a_window_before_the_start_is_padded_with_n(self):
+        self.assertEqual(get_padded_sequence(self.contig, -3, 4), "NNNACGT")
+
+    def test_a_window_past_both_ends_is_padded_on_both(self):
+        self.assertEqual(get_padded_sequence(self.contig, -2, 12), "NNACGTACGTACNN")
+
+    def test_the_result_always_has_the_requested_length(self):
+        for start, end in ((-7000, 3001), (5, 20000), (-5, 5), (9, 10), (0, 10)):
+            with self.subTest(start=start, end=end):
+                self.assertEqual(len(get_padded_sequence(self.contig, start, end)), end - start)
+
+    def test_the_variant_base_stays_at_its_offset(self):
+        # pangolin.py reads the REF at seq[5000+d], which only holds when the padding keeps the offsets
+        for pos in (1, 3, 10):
+            with self.subTest(pos=pos):
+                self.assertEqual(get_padded_sequence(self.contig, pos - 6, pos + 5)[5], "ACGTACGTAC"[pos - 1])
 
 
 if __name__ == "__main__":

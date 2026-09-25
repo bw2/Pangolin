@@ -8,7 +8,7 @@ import torch
 import vcf
 
 from pangolin.model import L, W, AR, Pangolin
-from pangolin.score_alignment import align_ref_and_alt_scores, ref_and_alt_bases_for_position
+from pangolin.score_alignment import align_ref_and_alt_scores, get_padded_sequence, ref_and_alt_bases_for_position
 
 FLOAT_FORMAT = "0.3f"
 
@@ -160,20 +160,11 @@ def process_position(lnum, chr, pos, gtf, models, args):
         chr = chr[3:]
 
     try:
-        # The start index is clamped because pyfastx does not raise on a negative one: it
-        # segfaults, taking the whole process with it. The length check below then rejects a
-        # window that ran off either end, which the bare slice could not do -- an overrun at the
-        # end comes back as a short read that would otherwise be scored as if it were whole.
-        seq = fasta[chr][max(pos-5001-d, 0):pos+5000+d].seq
+        # Near a contig end the window is padded with N rather than skipped.
+        seq = get_padded_sequence(fasta[chr], pos-5001-d, pos+5000+d)
     except Exception as e:
         print(e)
-        print("[Line %s]" % lnum, "WARNING, skipping position: Could not get sequence, possibly because the position is too close to chromosome ends. "
-                                  "See error message above.")
-        return None
-
-    if len(seq) != 10001 + 2*d:
-        print("[Line %s]" % lnum, "WARNING, skipping position: Too close to a chromosome end to read the "
-                                  "%dbp of sequence the model needs on each side." % (5000+d))
+        print("[Line %s]" % lnum, "WARNING, skipping position: Could not get sequence. See error message above.")
         return None
 
     genes_pos, genes_neg = get_genes(chr, pos, gtf)
@@ -250,20 +241,12 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
         chr = chr[3:]
 
     try:
-        # See the matching comment in process_position: a negative start index segfaults pyfastx
-        # rather than raising, so clamp it and check the length below instead.
-        seq = fasta[chr][max(pos-5001-d, 0):pos+len(ref)+4999+d].seq
+        # Near a contig end the window is padded with N rather than skipped, so the REF comparison
+        # that follows always reads the variant's own bases at offset 5000+d.
+        seq = get_padded_sequence(fasta[chr], pos-5001-d, pos+len(ref)+4999+d)
     except Exception as e:
         print(e)
-        print("[Line %s]" % lnum, "WARNING, skipping variant: Could not get sequence, possibly because the variant is too close to chromosome ends. "
-                                  "See error message above.")
-        return None
-
-    # Checked before the REF comparison below, which reads seq at a fixed offset of 5000+d and so
-    # is only looking at the variant's own bases when the window came back whole.
-    if len(seq) != 10000 + len(ref) + 2*d:
-        print("[Line %s]" % lnum, "WARNING, skipping variant: Too close to a chromosome end to read the "
-                                  "%dbp of sequence the model needs on each side." % (5000+d))
+        print("[Line %s]" % lnum, "WARNING, skipping variant: Could not get sequence. See error message above.")
         return None
 
     if seq[5000+d:5000+d+len(ref)] != ref:
