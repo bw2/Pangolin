@@ -1,4 +1,6 @@
 import argparse
+import os
+import threading
 from pkg_resources import resource_filename
 import gffutils
 import numpy as np
@@ -15,6 +17,25 @@ FLOAT_FORMAT = "0.3f"
 # use a 0.1 threshold for ALL_NON_ZERO_SCORES because Pangolin's baseline probability seems to be ~0.05 for most
 # positions, so 0.1 separates the unusually large scores
 MIN_SCORE_THRESHOLD = 0.1
+
+
+_FASTA_HANDLES_FOR_THIS_THREAD = threading.local()
+
+
+def open_fasta(reference_file):
+    """Open each reference FASTA once per thread and process.
+
+    pyfastx handles return wrong sequence when shared between threads, and a handle
+    inherited across fork() shares its file offset and SQLite connection with the parent.
+    """
+    fasta_handles = getattr(_FASTA_HANDLES_FOR_THIS_THREAD, "fasta_handles_by_pid_and_path", None)
+    if fasta_handles is None:
+        fasta_handles = _FASTA_HANDLES_FOR_THIS_THREAD.fasta_handles_by_pid_and_path = {}
+    key = (os.getpid(), reference_file)
+    if key not in fasta_handles:
+        fasta_handles[key] = pyfastx.Fasta(reference_file)
+    return fasta_handles[key]
+
 
 IN_MAP = np.asarray([[0, 0, 0, 0],
                      [1, 0, 0, 0],
@@ -153,7 +174,7 @@ def process_position(lnum, chr, pos, gtf, models, args):
     """
     d = args.distance
 
-    fasta = pyfastx.Fasta(args.reference_file)
+    fasta = open_fasta(args.reference_file)
     if chr not in fasta.keys() and "chr"+chr in fasta.keys():
         chr = "chr"+chr
     elif chr not in fasta.keys() and chr[3:] in fasta.keys():
@@ -233,7 +254,7 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
         print("[Line %s]" % lnum, "WARNING, skipping variant: Deletion too large")
         return None
 
-    fasta = pyfastx.Fasta(args.reference_file)
+    fasta = open_fasta(args.reference_file)
     # try to make vcf chromosomes compatible with reference chromosomes
     if chr not in fasta.keys() and "chr"+chr in fasta.keys():
         chr = "chr"+chr
