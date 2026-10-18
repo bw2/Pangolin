@@ -423,9 +423,13 @@ def main():
                 break
 
         variants = vcf.Reader(filename=variants)
-        variants.infos["Pangolin"] = vcf.parser._Info(
-            "Pangolin",'.',"String","Pangolin splice scores. "
-            "Format: gene|pos:score_change|pos:score_change|...",'.','.')
+        pangolin_info_fields = dict(
+            id="Pangolin", num='.', type="String", desc="Pangolin splice scores. "
+            "Format: gene|pos:score_change|pos:score_change|...", source='.', version='.')
+        # PyVCF3 (every release since 1.0.1) requires a type_code field that the original PyVCF doesn't have
+        if "type_code" in vcf.parser._Info._fields:
+            pangolin_info_fields["type_code"] = vcf.parser._encode_type("String")
+        variants.infos["Pangolin"] = vcf.parser._Info(**pangolin_info_fields)
         fout = vcf.Writer(open(args.output_file+".vcf", 'w'), variants)
 
         for i, variant in enumerate(variants):
